@@ -17,9 +17,7 @@
     <ClCompile Include="src\import_lib.cpp" />
     <ClCompile Include="src\infer\trt_infer.cpp" />
     <ClCompile Include="src\main.cpp" />
-    <ClCompile Include="src\test_summary.cpp" />
     <ClCompile Include="src\plugin\plugin.cpp" />
-    <ClCompile Include="src\plugin\plugin_list.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\builder\trt_builder.hpp" />
@@ -100,6 +98,7 @@
     </Link>
     <CudaCompile>
       <GPUDebugInfo>false</GPUDebugInfo>
+      <CodeGeneration>compute_61,sm_61</CodeGeneration>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -121,6 +120,9 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <CudaCompile>
+      <CodeGeneration>compute_61,sm_61</CodeGeneration>
+    </CudaCompile>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

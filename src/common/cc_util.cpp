@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <mutex>
 #include <memory>
+#include <thread>
 
 #if defined(U_OS_WINDOWS)
 #	define HAS_UUID
@@ -36,6 +37,137 @@ namespace ccutil{
 
 	using namespace std;
 
+#if defined(U_OS_WINDOWS)
+
+#define _LLFMT	"%I64"
+#define _TOSTRING(buf, fmt, val)	\
+	sprintf_s(buf, sizeof (buf), fmt, val)
+#else
+
+#define _LLFMT	"%ll"
+#define _TOSTRING(buf, fmt, val)	\
+	snprintf(buf, sizeof (buf), fmt, val)
+#endif
+
+	string tostr(int val){
+		char buffer[2 * 32];
+
+		_TOSTRING(buffer, "%d", val);
+		return buffer;
+	}
+
+	string tostr(unsigned int val){
+		char buffer[2 * 32];
+
+		_TOSTRING(buffer, "%u", val);
+		return buffer;
+	}
+
+	string tostr(long val){
+		char buffer[2 * 32];
+
+		_TOSTRING(buffer, "%ld", val);
+		return buffer;
+	}
+
+	string tostr(unsigned long val){
+		char buffer[2 * 32];
+
+		_TOSTRING(buffer, "%lu", val);
+		return buffer;
+	}
+
+	string tostr(long long val){
+		char buffer[2 * 32];
+
+		_TOSTRING(buffer, _LLFMT "d", val);
+		return buffer;
+	}
+
+	string tostr(unsigned long long val){
+		char buffer[2 * 32];
+
+		_TOSTRING(buffer, _LLFMT "u", val);
+		return buffer;
+	}
+
+	string tostr(const void* val){
+		char buffer[64];
+		_TOSTRING(buffer, "%p", val);
+		return buffer;
+	}
+
+	string tostr(long double val)
+	{	// convert long double to string
+		typedef back_insert_iterator<string> _Iter;
+		typedef num_put<char, _Iter> _Nput;
+		const _Nput& _Nput_fac = use_facet<_Nput>(locale());
+		ostream _Ios((streambuf *)0);
+		string str;
+
+		_Ios.setf(ios_base::fixed);
+		_Nput_fac.put(_Iter(str), _Ios, ' ', val);
+		return str;
+	}
+
+	string tostr(double val){
+		return (tostr((long double)val));
+	}
+
+	string tostr(float val){
+		return (tostr((long double)val));
+	}
+
+	static const char* level_string(int level){
+		switch (level){
+		case LINFO: return "I";
+		case LWARNING: return "W";
+		case LERROR: return "E";
+		case LFATAL: return "F";
+		default: return "Unknow";
+		}
+	}
+
+	AssertStream::AssertStream(bool condition, const char* file, int line, const char* code) :
+		condition_(condition), file_(file), line_(line), code_(code){
+	}
+
+	AssertStream::AssertStream(){
+		condition_ = true;
+	}
+
+	AssertStream::~AssertStream(){
+		if (!condition_){
+			if (msg_.empty()){
+				__log_func(file_, line_, LFATAL, "Assert Failure: %s", code_);
+			}
+			else{
+				__log_func(file_, line_, LFATAL, "Assert Failure: %s, %s", code_, msg_.c_str());
+			}
+			abort();
+		}
+	}
+
+	/////////////////////////////////////////////////////////////////////////////
+	LoggerStream::LoggerStream(bool condition, int level, const char* file, int line) :
+		condition_(condition), level_(level), file_(file), line_(line){
+	}
+
+	LoggerStream::~LoggerStream(){
+
+		if (condition_){
+			if (msg_.empty())
+				__log_func(file_, line_, level_, "");
+			else
+				__log_func(file_, line_, level_, "%s", msg_.c_str());
+		}
+
+		if (level_ == LFATAL){
+			abort();
+		}
+	}
+
+	/////////////////////////////////////////////////////////////////////////////
 	static shared_ptr<cv::RNG>& getRandom(){
 
 		static shared_ptr<cv::RNG> g_random;
@@ -103,6 +235,10 @@ namespace ccutil{
 		return (b - y) + 1;
 	}
 
+	cv::Point2f BBox::center() const {
+		return cv::Point2f((x + r) * 0.5, (y + b) * 0.5);
+	}
+
 	float BBox::area() const{
 		return width() * height();
 	}
@@ -110,8 +246,8 @@ namespace ccutil{
 	BBox::BBox(){
 	}
 
-	BBox::BBox(float x, float y, float r, float b, float score, const string& filename, const string& classname) :
-		x(x), y(y), r(r), b(b), score(score), filename(filename), classname(classname){
+	BBox::BBox(float x, float y, float r, float b, float score, int label) :
+		x(x), y(y), r(r), b(b), score(score), label(label){
 	}
 
 	BBox::operator cv::Rect() const{
@@ -143,6 +279,19 @@ namespace ccutil{
 		return out;
 	}
 
+	BBox BBox::expandMargin(float margin, const cv::Size& limit) const {
+
+		BBox expandbox;
+		expandbox.x = (int)(this->x - margin);
+		expandbox.y = (int)(this->y - margin);
+		expandbox.r = (int)(this->r + margin);
+		expandbox.b = (int)(this->b + margin);
+
+		if (limit.area() > 0)
+			expandbox = expandbox.box() & cv::Rect(0, 0, limit.width, limit.height);
+		return expandbox;
+	}
+
 	BBox BBox::expand(float ratio, const cv::Size& limit) const{
 
 		BBox expandbox;
@@ -150,7 +299,7 @@ namespace ccutil{
 		expandbox.y = (int)(this->y - this->height() * ratio);
 		expandbox.r = (int)(this->r + this->width() * ratio);
 		expandbox.b = (int)(this->b + this->height() * ratio);
-
+		
 		if (limit.area() > 0)
 			expandbox = expandbox.box() & cv::Rect(0, 0, limit.width, limit.height);
 		return expandbox;
@@ -265,38 +414,49 @@ namespace ccutil{
 	}
 
 	vector<string> split(const string& str, const std::string& spstr){
-		char* s = (char*)str.c_str();
-		char* context = nullptr;
-		char* token = strtok_s(s, spstr.c_str(), &context);
-		vector<string> out;
-		while (token){
-			out.push_back(token);
-			token = strtok_s(0, spstr.c_str(), &context);
+
+		vector<string> res;
+		if (str.empty()) return res;
+		if (spstr.empty()) return{ str };
+
+		auto p = str.find(spstr);
+		if (p == string::npos) return{ str };
+
+		res.reserve(5);
+		string::size_type prev = 0;
+		int lent = spstr.length();
+		const char* ptr = str.c_str();
+
+		while (p != string::npos){
+			int len = p - prev;
+			if (len > 0){
+				res.emplace_back(str.substr(prev, len));
+			}
+			prev = p + lent;
+			p = str.find(spstr, prev);
 		}
-		return out;
+
+		int len = str.length() - prev;
+		if (len > 0){
+			res.emplace_back(str.substr(prev, len));
+		}
+		return res;
 	}
 
 	vector<int> splitInt(const string& str, const string& spstr){
-		char* s = (char*)str.c_str();
-		char* context = nullptr;
-		char* token = strtok_s(s, spstr.c_str(), &context);
-		vector<int> out;
-		while (token){
-			out.push_back(atoi(token));
-			token = strtok_s(0, spstr.c_str(), &context);
-		}
+
+		auto arr = split(str, spstr);
+		vector<int> out(arr.size());
+		for (int i = 0; i < arr.size(); ++i)
+			out[i] = atoi(arr[i].c_str());
 		return out;
 	}
 
 	vector<float> splitFloat(const string& str, const string& spstr){
-		char* s = (char*)str.c_str();
-		char* context = nullptr;
-		char* token = strtok_s(s, spstr.c_str(), &context);
-		vector<float> out;
-		while (token){
-			out.push_back(atof(token));
-			token = strtok_s(0, spstr.c_str(), &context);
-		}
+		auto arr = split(str, spstr);
+		vector<float> out(arr.size());
+		for (int i = 0; i < arr.size(); ++i)
+			out[i] = atof(arr[i].c_str());
 		return out;
 	}
 
@@ -516,7 +676,7 @@ namespace ccutil{
 		return str.substr(p, e - p);
 	}
 
-	bool savexml(const string& file, int width, int height, const vector<BBox>& objs){
+	bool savexml(const string& file, int width, int height, const vector<LabBBox>& objs){
 		FILE* f = fopen(file.c_str(), "wb");
 		if (!f) return false;
 
@@ -539,9 +699,9 @@ namespace ccutil{
 		return true;
 	}
 
-	vector<BBox> loadxmlFromData(const string& data, int* width, int* height, const string& filter){
+	vector<LabBBox> loadxmlFromData(const string& data, int* width, int* height, const string& filter){
 
-		vector<BBox> output;
+		vector<LabBBox> output;
 		if (data.empty())
 			return output;
 
@@ -573,7 +733,7 @@ namespace ccutil{
 				float xmax = atof(middle(part, "<xmax>", "</xmax>").c_str());
 				float ymax = atof(middle(part, "<ymax>", "</ymax>").c_str());
 
-				BBox box;
+				LabBBox box;
 				box.x = xmin;
 				box.y = ymin;
 				box.r = xmax;
@@ -592,7 +752,7 @@ namespace ccutil{
 		return output;
 	}
 
-	vector<BBox> loadxml(const string& file, int* width, int* height, const string& filter){
+	vector<LabBBox> loadxml(const string& file, int* width, int* height, const string& filter){
 		return loadxmlFromData(loadfile(file), width, height, filter);
 	}
 
@@ -799,6 +959,52 @@ namespace ccutil{
 		return str;
 	}
 
+	bool isblank(const string& str, char blank){
+		if (str.empty()) return true;
+		
+		const char* s = str.c_str();
+		int len = str.length();
+		for (int i = 0; i < len; ++i, ++s){
+			if (*s != blank)
+				return false;
+		}
+		return true;
+	}
+
+	void rmblank(vector<string>& list){
+
+		vector<string> result;
+		result.reserve(list.size());
+
+		for (int i = 0; i < list.size(); ++i){
+			if (!isblank(list[i]))
+				result.push_back(list[i]);
+		}
+		std::swap(result, list);
+		
+		//for (int i = (int)list.size() - 1; i >= 0; --i){
+		//	if (isblank(list[i]))
+		//		list.erase(list.begin() + i);
+		//}
+	}
+
+	string rmsuffix(const string& path){
+
+		int p = path.rfind('.');
+		if (p == -1)
+			return path;
+		
+		int l = path.rfind('/');
+
+#ifdef U_OS_WINDOWS
+		int e = path.rfind('\\');
+		l = max(l, e);
+#endif
+		if (p > l)
+			return path.substr(0, p);
+		return path;
+	}
+
 	string vocxml(const string& vocjpg){
 		return repsuffix(repstr(vocjpg, "JPEGImages", "Annotations"), "xml");
 	}
@@ -813,7 +1019,17 @@ namespace ccutil{
 		if (p == -1)
 			return path + "." + newSuffix;
 
-		return path.substr(0, p + 1) + newSuffix;
+		int l = path.rfind('/');
+
+#ifdef U_OS_WINDOWS
+		int e = path.rfind('\\');
+		l = max(l, e);
+#endif
+		if (p > l)
+			return path.substr(0, p + 1) + newSuffix;
+
+		//没有.的文件，只是在尾巴加后缀，这种有点是在路径上的点而不是文件名的点
+		return path + "." + newSuffix;
 	}
 
 	vector<string> batchRepSuffix(const vector<string>& filelist, const string& newSuffix){
@@ -846,6 +1062,38 @@ namespace ccutil{
 
 		if (u <= p) u = path.size();
 		return path.substr(p, u - p);
+	}
+
+	vector<BBox> nmsAsClass(const vector<BBox>& objs, float iou_threshold) {
+
+		map<int, vector<BBox>> mapper;
+		for (int i = 0; i < objs.size(); ++i) {
+			mapper[objs[i].label].push_back(objs[i]);
+		}
+
+		vector<BBox> out;
+		for (auto& item : mapper) {
+			auto& objsClasses = item.second;
+			std::sort(objsClasses.begin(), objsClasses.end(), [](const BBox& a, const BBox& b) {
+				return a.score > b.score;
+			});
+			
+			vector<int> flags(objsClasses.size());
+			for (int i = 0; i < objsClasses.size(); ++i) {
+				if (flags[i] == 1) continue;
+
+				out.push_back(objsClasses[i]);
+				flags[i] = 1;
+				for (int k = i + 1; k < objsClasses.size(); ++k) {
+					if (flags[k] == 0) {
+						float iouUnion = objsClasses[i].iouOf(objsClasses[k]);
+						if (iouUnion > iou_threshold)
+							flags[k] = 1;
+					}
+				}
+			}
+		}
+		return out;
 	}
 
 	vector<BBox> nms(vector<BBox>& objs, float iou_threshold){
@@ -1361,6 +1609,7 @@ namespace ccutil{
 		if (mode.empty())
 			return false;
 
+		bool hasReadMode = false;
 		string mode_ = mode;
 		bool hasBinary = false;
 		for (int i = 0; i < mode_.length(); ++i){
@@ -1368,6 +1617,9 @@ namespace ccutil{
 				hasBinary = true;
 				break;
 			}
+
+			if (mode_[i] == 'r')
+				hasReadMode = true;
 		}
 
 		if (!hasBinary){
@@ -1384,12 +1636,21 @@ namespace ccutil{
 		else
 			f_ = fopen(file.c_str(), mode_.c_str());
 		flag_ = FileIO;
+
+		readModeEndSEEK_ = 0;
+		if (hasReadMode && f_ != nullptr){
+			//获取他的end
+			fseek(f_, 0, SEEK_END);
+			readModeEndSEEK_ = ftell(f_);
+			fseek(f_, 0, SEEK_SET);
+		}
 		return opened();
 	}
 
 	void BinIO::close(){
 
 		if (flag_ == FileIO) {
+			readModeEndSEEK_ = 0;
 			if (f_) {
 				fclose(f_);
 				f_ = nullptr;
@@ -1443,6 +1704,24 @@ namespace ccutil{
 		}
 		else {
 			return -1;
+		}
+	}
+	
+	bool BinIO::eof(){
+		if (!opened()) return true;
+
+		if (flag_ == FileIO){
+			return ftell(f_) >= readModeEndSEEK_ || feof(f_);
+		}
+		else if (flag_ == MemoryRead){
+			return this->memoryCursor_ >= this->memoryLength_;
+		}
+		else if (flag_ == MemoryWrite){
+			return false;
+		}
+		else {
+			INFO("Unsupport flag: %d", flag_);
+			return true;
 		}
 	}
 
@@ -1499,6 +1778,24 @@ namespace ccutil{
 		return *this;
 	}
 
+	BinIO& BinIO::operator << (const vector<string>& value){
+		(*this) << (int)value.size();
+		for (int i = 0; i < value.size(); ++i){
+			(*this) << value[i];
+		}
+		return *this;
+	}
+
+	BinIO& BinIO::operator >> (vector<string>& value){
+		int num;
+		(*this) >> num;
+
+		value.resize(num);
+		for (int i = 0; i < value.size(); ++i)
+			(*this) >> value[i];
+		return *this;
+	}
+
 	BinIO& BinIO::operator >> (cv::Mat& value){
 
 		value = loadMatrix(f_);
@@ -1534,188 +1831,12 @@ namespace ccutil{
 
 
 	//////////////////////////////////////////////////////////////////////////
-#if defined(U_OS_WINDOWS)
-	void GetStringSize(HDC hDC, const char* str, int* w, int* h)
-	{
-		SIZE size;
-		GetTextExtentPoint32A(hDC, str, strlen(str), &size);
-		if (w != 0) *w = size.cx;
-		if (h != 0) *h = size.cy;
-	}
-
-	void drawText(cv::Mat& _dst, const std::string& str, cv::Point org, cv::Scalar color, int fontSize, bool bold, bool italic, bool underline)
-	{
-		IplImage ipldst = _dst;
-		IplImage* dst = &ipldst;
-		if (dst == nullptr)
-			return;
-		
-		if (dst->depth != IPL_DEPTH_8U){
-			printf("drawText input image.depth != 8U\n");
-			return;
-		}
-
-		if (dst->nChannels != 1 && dst->nChannels != 3){
-			printf("drawText image.channels only support 1 or 3\n");
-			return;
-		}
-
-		//if (box) box->x = box->y = box->width = box->height = 0;
-		int x, y, r, b;
-		if (org.x > dst->width || org.y > dst->height) return;
-
-		LOGFONTA lf;
-		lf.lfHeight = -fontSize;
-		lf.lfWidth = 0;
-		lf.lfEscapement = 0;
-		lf.lfOrientation = 0;
-		lf.lfWeight = bold ? FW_BOLD : FW_NORMAL;
-		lf.lfItalic = italic;	//斜体
-		lf.lfUnderline = underline;	//下划线
-		lf.lfStrikeOut = 0;
-		lf.lfCharSet = DEFAULT_CHARSET;
-		lf.lfOutPrecision = 0;
-		lf.lfClipPrecision = 0;
-		lf.lfQuality = PROOF_QUALITY;
-		lf.lfPitchAndFamily = 0;
-		strcpy(lf.lfFaceName, "微软雅黑");
-
-		HFONT hf = CreateFontIndirectA(&lf);
-		HDC hDC = CreateCompatibleDC(0);
-		HFONT hOldFont = (HFONT)SelectObject(hDC, hf);
-
-		int strBaseW = 0, strBaseH = 0;
-		int singleRow = 0;
-		char buf[3000];
-		strcpy(buf, str.c_str());
-
-		//处理多行
-		{
-			int nnh = 0;
-			int cw, ch;
-			const char* ln = strtok(buf, "\n");
-			while (ln != 0)
-			{
-				GetStringSize(hDC, ln, &cw, &ch);
-				strBaseW = max(strBaseW, cw);
-				strBaseH = max(strBaseH, ch);
-
-				ln = strtok(0, "\n");
-				nnh++;
-			}
-			singleRow = strBaseH;
-			strBaseH *= nnh;
-		}
-
-		int centerx = 0;
-		int centery = 0;
-		if (org.x < ORG_Center*0.5){
-			org.x = (dst->width - strBaseW) * 0.5 + (org.x - ORG_Center);
-			centerx = 1;
-		}
-
-		if (org.y < ORG_Center*0.5){
-			org.y = (dst->height - strBaseH) * 0.5 + (org.y - ORG_Center);
-			centery = 1;
-		}
-
-		x = org.x < 0 ? -org.x : 0;
-		y = org.y < 0 ? -org.y : 0;
-
-		if (org.x + strBaseW < 0 || org.y + strBaseH < 0)
-		{
-			SelectObject(hDC, hOldFont);
-			DeleteObject(hf);
-			DeleteObject(hDC);
-			return;
-		}
-
-		r = org.x + strBaseW > dst->width ? dst->width - org.x - 1 : strBaseW - 1;
-		b = org.y + strBaseH > dst->height ? dst->height - org.y - 1 : strBaseH - 1;
-		org.x = org.x < 0 ? 0 : org.x;
-		org.y = org.y < 0 ? 0 : org.y;
-
-		BITMAPINFO bmp = { 0 };
-		BITMAPINFOHEADER& bih = bmp.bmiHeader;
-		int strDrawLineStep = strBaseW * 3 % 4 == 0 ? strBaseW * 3 : (strBaseW * 3 + 4 - ((strBaseW * 3) % 4));
-
-		bih.biSize = sizeof(BITMAPINFOHEADER);
-		bih.biWidth = strBaseW;
-		bih.biHeight = strBaseH;
-		bih.biPlanes = 1;
-		bih.biBitCount = 24;
-		bih.biCompression = BI_RGB;
-		bih.biSizeImage = strBaseH * strDrawLineStep;
-		bih.biClrUsed = 0;
-		bih.biClrImportant = 0;
-
-		void* pDibData = 0;
-		HBITMAP hBmp = CreateDIBSection(hDC, &bmp, DIB_RGB_COLORS, &pDibData, 0, 0);
-		if (pDibData == nullptr) return;
-
-		HBITMAP hOldBmp = (HBITMAP)SelectObject(hDC, hBmp);
-
-		//color.val[2], color.val[1], color.val[0]
-		SetTextColor(hDC, RGB(255, 255, 255));
-		SetBkColor(hDC, 0);
-		//SetStretchBltMode(hDC, COLORONCOLOR);
-
-		strcpy(buf, str.c_str());
-		const char* ln = strtok(buf, "\n");
-		int outTextY = 0;
-		while (ln != 0)
-		{
-			if (centerx){
-				int cw, ch;
-				GetStringSize(hDC, ln, &cw, &ch);
-				TextOutA(hDC, (strBaseW - cw) * 0.5, outTextY, ln, strlen(ln));
-			}
-			else{
-				TextOutA(hDC, 0, outTextY, ln, strlen(ln));
-			}
-			outTextY += singleRow;
-			ln = strtok(0, "\n");
-		}
-
-		//if (box){
-		//	*box = cv::Rect(org.x, org.y, strBaseW, strBaseH);
-		//	*box = *box & cv::Rect(0, 0, dst->width, dst->height);
-		//}
-
-		unsigned char* pImg = (unsigned char*)dst->imageData + org.x * dst->nChannels + org.y * dst->widthStep;
-		unsigned char* pStr = (unsigned char*)pDibData + x * 3;
-		for (int tty = y; tty <= b; ++tty)
-		{
-			unsigned char* subImg = pImg + (tty - y) * dst->widthStep;
-			unsigned char* subStr = pStr + (strBaseH - tty - 1) * strDrawLineStep;
-			for (int ttx = x; ttx <= r; ++ttx)
-			{
-				for (int n = 0; n < dst->nChannels; ++n){
-					float alpha = subStr[n] / 255.0f;
-					subImg[n] = cv::saturate_cast<uchar>(alpha * color.val[n] + (1 - alpha) * subImg[n]);
-				}
-
-				subStr += 3;
-				subImg += dst->nChannels;
-			}
-		}
-
-		SelectObject(hDC, hOldBmp);
-		SelectObject(hDC, hOldFont);
-		DeleteObject(hf);
-		DeleteObject(hBmp);
-		DeleteDC(hDC);
-	}
-#endif
-
-
-	///////////////////////////////////////////////////////////////////////
 	//为0时，不cache，为-1时，所有都cache
 	FileCache::FileCache(int maxCacheSize){
 		maxCacheSize_ = maxCacheSize;
 	}
 
-	vector<BBox> FileCache::loadxml(const string& file, int* width, int* height, const string& filter){
+	vector<LabBBox> FileCache::loadxml(const string& file, int* width, int* height, const string& filter){
 		return loadxmlFromData(this->loadfile(file), width, height, filter);
 	}
 
@@ -2046,6 +2167,40 @@ namespace ccutil{
 	_getsystime(&t);
 #endif
 
+	string nowFormat(const string& fmt) {
+		string output;
+		__GetTimeBlock;
+
+		char buf[100];
+		for (int i = 0; i < fmt.length(); ++i) {
+			char c = fmt[i];
+			if (c == 'Y') {			//year
+				sprintf(buf, "%04d", t.tm_year + 1900);
+			}
+			else if (c == 'M') {	//Month
+				sprintf(buf, "%02d", t.tm_mon + 1);
+			}
+			else if (c == 'D') {	//Day
+				sprintf(buf, "%02d", t.tm_mday);
+			}
+			else if (c == 'h') {	//hour
+				sprintf(buf, "%02d", t.tm_hour);
+			}
+			else if (c == 'm') {	//minute
+				sprintf(buf, "%02d", t.tm_min);
+			}
+			else if (c == 's') {	//second
+				sprintf(buf, "%02d", t.tm_sec);
+			}
+			else {
+				output.push_back(c);
+				continue;
+			}
+			output += buf;
+		}
+		return output;
+	}
+
 	string timeNow(){
 		char time_string[20];
 		__GetTimeBlock;
@@ -2062,81 +2217,189 @@ namespace ccutil{
 		return time_string;
 	}
 
-	void __assert_func(bool condition, const char* file, int line, const char* function, const char* code) {
+	static struct Logger{
+		mutex logger_lock_;
+		string logger_directory;
+		LoggerListener logger_listener = nullptr;
+		volatile bool has_logger = true;
+		FILE* handler = nullptr;
+		size_t lines = 0;		//日志长度计数
 
-		if (condition) return;
+		void setLoggerSaveDirectory(const string& loggerDirectory) {
 
-		__log_func(file, line, function,
-			"ERROR: Assert is Failure: %s\n"
-			"File: %s:%d\n"
-			"Function: %s",
-			code, file, line, function
-		);
-		abort();
-	}
+			//if logger is stop
+			if (!has_logger)
+				return;
 
-	static mutex __g_logger_lock_;
-	static string __g_logger_directory;
-	static LoggerListener __g_logger_listener = nullptr;
-	static char __g_logger_buffer[10000];
-	void setLoggerListener(LoggerListener func){
-		__g_logger_listener = func;
-	}
+			std::unique_lock<mutex> l(logger_lock_);
+			if (handler != nullptr){
+				//对于已经打开的文件，必须关闭，如果要修改目录的话
+				fclose(handler);
+				handler = nullptr;
+			}
 
-	void setLoggerSaveDirectory(const string& loggerDirectory) {
+			logger_directory = loggerDirectory;
 
-		std::unique_lock<mutex> l(__g_logger_lock_);
-		__g_logger_directory = loggerDirectory;
-
-		if (__g_logger_directory.empty())
-			__g_logger_directory = ".";
+			if (logger_directory.empty())
+				logger_directory = ".";
 
 #if defined(U_OS_LINUX)
-		if (__g_logger_directory.back() != '/') {
-			__g_logger_directory.push_back('/');
-		}
+			if (logger_directory.back() != '/') {
+				logger_directory.push_back('/');
+			}
 #endif
 
 #if defined(U_OS_WINDOWS)
-		if (__g_logger_directory.back() != '/' && __g_logger_directory.back() != '\\') {
-			__g_logger_directory.push_back('/');
-		}
+			if (logger_directory.back() != '/' && logger_directory.back() != '\\') {
+				logger_directory.push_back('/');
+			}
 #endif
+		}
+
+		virtual ~Logger(){
+			if (handler){
+				fclose(handler);
+				handler = nullptr;
+			}
+		}
+	}__g_logger;
+
+	static bool loggerCatchListener(const char* file, int line, int level, const char* message){
+		__log_func(file, line, level, "%s", message);
+		return false;
 	}
 
-	void __log_func(const char* file, int line, const char* function, const char* fmt, ...) {
+	LoggerListener getCatchLoggerListener(){
+		return loggerCatchListener;
+	}
 
-		std::unique_lock<mutex> l(__g_logger_lock_);
+	bool hasLogger(){
+		return __g_logger.has_logger;
+	}
+
+	void setLogger(bool hasLogger){
+		__g_logger.has_logger = hasLogger;
+	}
+
+	void setLoggerListener(LoggerListener func){
+		__g_logger.logger_listener = func;
+	}
+
+	void setLoggerSaveDirectory(const string& loggerDirectory) {
+		__g_logger.setLoggerSaveDirectory(loggerDirectory);
+	}
+
+	void __log_func(const char* file, int line, int level, const char* fmt, ...) {
+
+		if (__g_logger.logger_listener != nullptr){
+			//如果返回false，则直接返回，返回true才会写入日志系统
+			char buffer[10000];
+			va_list vl;
+			va_start(vl, fmt);
+			vsprintf(buffer, fmt, vl);
+			if (!__g_logger.logger_listener(file, line, level, buffer))
+				return;
+		}
+
+		//if logger is stop
+		if (!__g_logger.has_logger)
+			return;
+
+		std::unique_lock<mutex> l(__g_logger.logger_lock_);
 		string now = timeNow();
 
 		va_list vl;
 		va_start(vl, fmt);
 		
-		string funcName = function;
-		if (funcName.length() > 32) {
-			funcName = funcName.substr(0, 16) + "..." + funcName.substr(funcName.length() - 10);
-		}
+		char buffer[10000];
+		int n = sprintf(buffer, "%s[%s:%s:%d]:", level_string(level), now.c_str(), fileName(file, true).c_str(), line);
+		vsprintf(buffer + n, fmt, vl);
+		printf("%s\n", buffer);
 
-		int n = sprintf(__g_logger_buffer, "[%s:%s(%d):%s]:", now.c_str(), fileName(file, true).c_str(), line, funcName.c_str());
-		vsprintf(__g_logger_buffer + n, fmt, vl);
-
-		if (__g_logger_listener != nullptr)
-			__g_logger_listener(__g_logger_buffer);
-		else
-			printf("%s\n", __g_logger_buffer);
-
-		if (!__g_logger_directory.empty()) {
+		if (!__g_logger.logger_directory.empty()) {
 			string file = dateNow();
-			string savepath = __g_logger_directory + file + ".log";
-			FILE* f = fopen_mkdirs(savepath.c_str(), "a+");
-			if (f) {
-				fprintf(f, "%s\n", __g_logger_buffer);
-				fclose(f);
+			string savepath = __g_logger.logger_directory + file + ".log";
+
+			if (__g_logger.handler != nullptr){
+				if (__g_logger.lines % 100 == 0){
+					if (!ccutil::exists(savepath)){
+						fclose(__g_logger.handler);
+						__g_logger.handler = nullptr;
+					}
+				}
+			}
+
+			if (__g_logger.handler == nullptr){
+				__g_logger.handler = fopen_mkdirs(savepath.c_str(), "a+");
+			}
+
+			if (__g_logger.handler) {
+				fprintf(__g_logger.handler, "%s\n", buffer);
+				__g_logger.lines++;
+				
+				if (__g_logger.lines % 100 == 0){
+					//每10行写入到硬盘
+					fflush(__g_logger.handler);
+				}
+
+				if (level == LFATAL){
+					//如果是错误，那么接下来就会结束程序，结束前需要先把文件关闭掉
+					fclose(__g_logger.handler);
+					__g_logger.handler = nullptr;
+				}
 			}
 			else {
 				printf("ERROR: can not open logger file: %s\n", savepath.c_str());
 			}
 		}
+	}
+
+	class ThreadContext {
+	public:
+		struct Context {
+			void* data_ = nullptr;
+		};
+
+		Context* getContext(thread::id idd) {
+			Context* output = nullptr;
+			std::unique_lock<mutex> l(lock_);
+			auto iter = contextMapper_.find(idd);
+			if (iter != contextMapper_.end()) {
+				output = iter->second.get();
+			}
+			return output;
+		}
+
+		Context* getAndCreateContext(thread::id idd) {
+			Context* output = nullptr;
+			std::unique_lock<mutex> l(lock_);
+			auto iter = contextMapper_.find(idd);
+			if (iter != contextMapper_.end()) {
+				output = iter->second.get();
+			}
+			else {
+				output = new Context();
+				contextMapper_[idd].reset(output);
+			}
+			return output;
+		}
+
+	private:
+		mutex lock_;
+		map<thread::id, shared_ptr<Context>> contextMapper_;
+	};
+
+	static shared_ptr<ThreadContext> g_threadContext(new ThreadContext());
+	void setThreadContext(void* ptr) {
+		g_threadContext->getAndCreateContext(this_thread::get_id())->data_ = ptr;
+	}
+
+	void* getThreadContext() {
+		auto context = g_threadContext->getContext(this_thread::get_id());
+		void* data = nullptr;
+		if (!context) 
+			data = context->data_;
+		return data;
 	}
 	//////////////////////////////////////////////////////////////////////////////////////////////////////
 };
